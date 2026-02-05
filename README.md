@@ -1,0 +1,2 @@
+# stock_to_TiDB
+通过国金xtquant量化接口，以及tushare把历史数据上传到TiDB的集群
