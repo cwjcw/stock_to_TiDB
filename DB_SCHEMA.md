@@ -82,17 +82,16 @@
 ## 5. 风险监控与状态过滤 (存储于 AS_MASTER)
 
 ### 5.1 limit_list (每日涨跌停统计)
-- **数据源**：Tushare 涨跌停 (doc_id=198)
-- **字段变更**：金额单位 **×1000 转为元**。
+- **数据源**：Tushare 涨跌停 (doc_id=298)
 - **主键**：`(ts_code, trade_date)`
 
 ### 5.2 st_list (ST 状态记录)
-- **数据源**：Tushare 股票更名/ST 记录
+- **数据源**：Tushare 股票更名/ST 记录 (doc_id=397)
 - **用途**：回测时动态剔除风险警示股。
 - **主键**：`(ts_code, start_date)`
 
 ### 5.3 suspend_d (停复牌记录)
-- **数据源**：Tushare (doc_id=31)
+- **数据源**：Tushare (doc_id=214)
 - **用途**：过滤当日无法买卖的标的。
 - **主键**：`(ts_code, trade_date)`
 
@@ -123,5 +122,6 @@
 [https://tushare.pro/document/2?doc_id=344](https://tushare.pro/document/2?doc_id=344) (板块资金流)
 [https://tushare.pro/document/2?doc_id=345](https://tushare.pro/document/2?doc_id=345) (大盘资金流)
 [https://tushare.pro/document/2?doc_id=47](https://tushare.pro/document/2?doc_id=47) (沪深港通)
-[https://tushare.pro/document/2?doc_id=198](https://tushare.pro/document/2?doc_id=198) (涨跌停)
-[https://tushare.pro/document/2?doc_id=31](https://tushare.pro/document/2?doc_id=31) (停复牌)
+[https://tushare.pro/document/2?doc_id=298](https://tushare.pro/document/2?doc_id=298) (涨跌停)
+[https://tushare.pro/document/2?doc_id=214](https://tushare.pro/document/2?doc_id=214) (停复牌)
+[https://tushare.pro/document/2?doc_id=397](https://tushare.pro/document/2?doc_id=397) (ST股票列表)
