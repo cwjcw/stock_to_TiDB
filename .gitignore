@@ -208,3 +208,8 @@ __marimo__/
 
 # project
 CA/
+logs/
+*.log
+_codes*.txt
+_sample_*.txt
+_qmt_out*.err.txt

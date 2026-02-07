@@ -1,0 +1,8 @@
+numpy>=1.26
+pandas>=2.2
+python-dotenv>=1.0
+pymysql>=1.1
+sqlalchemy>=2.0
+tenacity>=8.2
+tqdm>=4.66
+tushare>=1.4

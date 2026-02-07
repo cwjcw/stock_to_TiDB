@@ -53,7 +53,7 @@
   - `time`：统一格式为 `YYYYMMDDHHMMSS`
   - `volume/vol`：原始单位为“手”，入库后改名为 **`vol_share`**，并 **/100 转为股**
 - **主键**：`(ts_code, trade_time)`
-- **存储建议**：按 `ts_code` 哈希路由分布至三个分片集群。
+- **存储建议**：按 `ts_code` 哈希路由分布至三个AS-5MIN分片集群。
 
 ---
 
