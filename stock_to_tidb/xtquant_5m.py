@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 from sqlalchemy import text
 
 from .env import Settings
@@ -204,7 +205,11 @@ def update_minute_5m(
                 end=et,
                 out_csv_gz=out_csv,
             )
-            df = pd.read_csv(out_csv, compression="gzip")
+            try:
+                df = pd.read_csv(out_csv, compression="gzip")
+            except EmptyDataError:
+                # Worker may have produced an empty file for suspended/non-trading symbols.
+                df = pd.DataFrame()
             # Keep the intermediate csv.gz if debugging is needed.
             if not (os.environ.get("STOCK_TO_TIDB_KEEP_QMT_CSV") == "1"):
                 try:

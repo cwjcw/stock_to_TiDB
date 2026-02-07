@@ -31,19 +31,85 @@ def _market_dict_to_long(mkt):
 
     if not mkt:
         return pd.DataFrame()
+
+    def _looks_like_tscode(s):
+        if not isinstance(s, str):
+            return False
+        s = s.strip().upper()
+        return s.endswith(".SH") or s.endswith(".SZ") or s.endswith(".BJ")
+
+    def _normalize_trade_time_col(df, col):
+        # Downstream expects yyyymmddHHMMSS strings.
+        if col not in df.columns:
+            return df
+        v = df[col]
+        if pd.api.types.is_datetime64_any_dtype(v):
+            df[col] = v.dt.strftime("%Y%m%d%H%M%S")
+        else:
+            df[col] = v.astype(str)
+            # common artifact: "20260205093500.0"
+            # pandas on embedded Python may be old; avoid str.replace(..., regex=...)
+            df[col] = df[col].str.replace(r"\\.0$", "")
+        return df
+
+    sample_key = None
+    for k in mkt.keys():
+        sample_key = k
+        break
+
+    # Case 1: {ts_code -> DataFrame(index=time, columns=field)}
+    if _looks_like_tscode(sample_key):
+        out = []
+        for code, df in mkt.items():
+            if df is None or getattr(df, "empty", False):
+                continue
+            if not hasattr(df, "reset_index"):
+                continue
+            dfx = df.copy().reset_index()
+            if "index" in dfx.columns and "trade_time" not in dfx.columns:
+                dfx = dfx.rename(columns={"index": "trade_time"})
+            dfx["ts_code"] = str(code)
+            dfx["ts_code"] = dfx["ts_code"].astype(str)
+            dfx = _normalize_trade_time_col(dfx, "trade_time")
+            out.append(dfx)
+        if not out:
+            return pd.DataFrame()
+        df_all = pd.concat(out, ignore_index=True)
+        cols = list(df_all.columns)
+        for c in ["ts_code", "trade_time"]:
+            if c in cols:
+                cols.remove(c)
+        return df_all[["ts_code", "trade_time"] + cols]
+
+    # Case 2: {field -> DataFrame(index=time, columns=ts_code)}
     parts = []
     for field, df in mkt.items():
+        if df is None or getattr(df, "empty", False):
+            continue
         if not hasattr(df, "stack"):
             continue
         s = df.stack(dropna=False)
-        s.name = field
+        s.name = str(field)
         parts.append(s)
     if not parts:
         return pd.DataFrame()
     wide = pd.concat(parts, axis=1).reset_index()
-    wide = wide.rename(columns={"level_0": "ts_code", "level_1": "trade_time"})
-    # Ensure trade_time is string (usually yyyymmddHHMMSS)
-    wide["trade_time"] = wide["trade_time"].astype(str)
+    # xtquant docs for Kline: DataFrame index=stock_list, columns=time_list
+    # but some variants are transposed. Detect which level is ts_code vs trade_time.
+    col0 = "level_0"
+    col1 = "level_1"
+    v0 = wide[col0].iloc[0] if len(wide) else None
+    v1 = wide[col1].iloc[0] if len(wide) else None
+    if _looks_like_tscode(v0) and (not _looks_like_tscode(v1)):
+        wide = wide.rename(columns={col0: "ts_code", col1: "trade_time"})
+    elif _looks_like_tscode(v1) and (not _looks_like_tscode(v0)):
+        wide = wide.rename(columns={col0: "trade_time", col1: "ts_code"})
+    else:
+        # Fallback: assume doc orientation.
+        wide = wide.rename(columns={col0: "ts_code", col1: "trade_time"})
+
+    wide["ts_code"] = wide["ts_code"].astype(str)
+    wide = _normalize_trade_time_col(wide, "trade_time")
     return wide
 
 
@@ -59,6 +125,7 @@ def main(argv=None):
 
     _add_site_packages(args.site_packages)
 
+    import pandas as pd
     from xtquant import xtdata  # noqa
 
     codes = _read_codes(args.codes_file)
@@ -81,7 +148,8 @@ def main(argv=None):
                 continue
             raise
     mkt = xtdata.get_market_data_ex(
-        field_list=[],
+        # Explicit fields keeps returned structure more stable across QMT versions.
+        field_list=["open", "high", "low", "close", "volume", "amount"],
         stock_list=codes,
         period=args.period,
         start_time=args.start,
@@ -92,6 +160,10 @@ def main(argv=None):
     )
 
     df = _market_dict_to_long(mkt)
+    if df is None or getattr(df, "empty", False):
+        # Always write a CSV with a header so the upstream pandas reader doesn't
+        # throw EmptyDataError on blank files.
+        df = pd.DataFrame(columns=["ts_code", "trade_time", "open", "high", "low", "close", "volume", "amount"])
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     # gzip CSV is the lowest-common-denominator format for embedded Python.
     import gzip
