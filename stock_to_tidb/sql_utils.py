@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import Date, DateTime, Float, Integer, MetaData, String, Table, Text, inspect, text
-from sqlalchemy.dialects.mysql import BIGINT, insert as mysql_insert
+from sqlalchemy.dialects.mysql import BIGINT, DECIMAL, insert as mysql_insert
 from sqlalchemy.engine import Engine
 
 
@@ -64,6 +64,10 @@ def normalize_yyyymmddhhmmss_dt(df: pd.DataFrame, col: str) -> pd.DataFrame:
 
 def _infer_type(col: str, series: pd.Series):
     c = col.lower()
+    # Moneyflow (hsgt) numbers are returned as strings by Tushare in some environments.
+    # Use DECIMAL in schema to make analytics safe and avoid string casts in SQL.
+    if c in {"ggt_ss", "ggt_sz", "hgt", "sgt", "north_money", "south_money"}:
+        return DECIMAL(24, 2)
     if c in {"ts_code", "symbol", "exchange", "market", "content_type"}:
         return String(32)
     if c.endswith("_date") or c in {"cal_date", "trade_date", "list_date", "delist_date", "start_date", "end_date"}:

@@ -72,6 +72,15 @@ def _post_trade_date(df: pd.DataFrame) -> pd.DataFrame:
     return normalize_yyyymmdd_date(df, "trade_date")
 
 
+def _post_moneyflow_hsgt(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_yyyymmdd_date(df, "trade_date")
+    # Tushare often returns these numeric fields as strings; normalize for easier analytics.
+    for c in ["ggt_ss", "ggt_sz", "hgt", "sgt", "north_money", "south_money"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
 def _post_index_daily(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_yyyymmdd_date(df, "trade_date")
     if "vol" in df.columns:
@@ -257,7 +266,7 @@ MASTER_TABLES: dict[str, TableSpec] = {
         retention_open_days=500,
         by_trade_date=True,
         fetch_day=_fetch_moneyflow_hsgt_day,
-        post=_post_trade_date,
+        post=_post_moneyflow_hsgt,
     ),
     "limit_list": TableSpec(
         table_name="limit_list",

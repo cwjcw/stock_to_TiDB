@@ -369,7 +369,19 @@ def backfill_minute_5m_market_250d(
         cfg = load_tidb_config(settings, cluster)
         engine = make_engine(cfg)
         ensure_state_table(engine)
-        sample = pd.DataFrame(columns=["ts_code", "trade_time", "open", "high", "low", "close", "volume", "amount"])
+        # Use typed empty columns; otherwise ensure_table_from_df would infer VARCHAR for numeric fields.
+        sample = pd.DataFrame(
+            {
+                "ts_code": pd.Series(dtype="string"),
+                "trade_time": pd.Series(dtype="datetime64[ns]"),
+                "open": pd.Series(dtype="float64"),
+                "high": pd.Series(dtype="float64"),
+                "low": pd.Series(dtype="float64"),
+                "close": pd.Series(dtype="float64"),
+                "amount": pd.Series(dtype="float64"),
+                "vol_share": pd.Series(dtype="float64"),
+            }
+        )
         ensure_table_from_df(engine, table_name, sample, primary_keys)
         if reset_cursor:
             # Set to the day before the first backfill day so resume will start from days[0].
