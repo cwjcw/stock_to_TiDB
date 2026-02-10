@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, timedelta
+from threading import Lock
 from typing import Any, Callable
 
 import pandas as pd
@@ -20,13 +23,54 @@ from .state import ensure_state_table, get_cursor, set_cursor
 from .trade_cal import cutoff_by_last_open_days, date_to_yyyymmdd, fallback_cutoff, get_open_trade_dates, parse_date_any
 
 
+class RateLimiter:
+    """
+    Simple per-process sliding-window rate limiter (e.g. 300 calls/min).
+    """
+
+    def __init__(self, max_calls_per_minute: int):
+        self._max = int(max_calls_per_minute)
+        self._lock = Lock()
+        self._ts: deque[float] = deque()
+
+    def wait(self) -> None:
+        if self._max <= 0:
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - 60.0
+                while self._ts and self._ts[0] <= cutoff:
+                    self._ts.popleft()
+                if len(self._ts) < self._max:
+                    self._ts.append(now)
+                    return
+                sleep_s = max(0.0, (self._ts[0] + 60.0) - now) + 0.02
+            time.sleep(sleep_s)
+
+
+_RATE_LIMITER: RateLimiter | None = None
+_SETTINGS_ENV: dict[str, str] | None = None
+
+
 def make_pro(settings: Settings):
     ts.set_token(settings.tushare_token)
+    global _RATE_LIMITER
+    global _SETTINGS_ENV
+    _SETTINGS_ENV = dict(settings.env or {})
+    try:
+        max_cpm = int((settings.env.get("TUSHARE_MAX_CALLS_PER_MIN") or "300").strip())
+    except Exception:
+        max_cpm = 300
+    if _RATE_LIMITER is None or getattr(_RATE_LIMITER, "_max", None) != max_cpm:
+        _RATE_LIMITER = RateLimiter(max_calls_per_minute=max_cpm)
     return ts.pro_api()
 
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=20))
 def _pro_query(pro, api: str, **params) -> pd.DataFrame:
+    if _RATE_LIMITER is not None:
+        _RATE_LIMITER.wait()
     return pro.query(api, **params)
 
 
@@ -41,6 +85,28 @@ class TableSpec:
     fetch_range: Callable[[Any, str, str], pd.DataFrame] | None = None  # (pro, start_yyyymmdd, end_yyyymmdd) -> df
     fetch_day: Callable[[Any, str], pd.DataFrame] | None = None  # (pro, trade_date_yyyymmdd) -> df
     post: Callable[[pd.DataFrame], pd.DataFrame] | None = None
+
+
+LIMIT_MAX = 6000
+
+
+def _pro_query_paged(pro, api: str, *, limit: int, **params) -> pd.DataFrame:
+    """
+    Query with (limit, offset) paging until exhausted.
+    Keeps each API call under a configured row cap (e.g. 6000 rows/call).
+    """
+    limit = int(limit)
+    offset = 0
+    frames: list[pd.DataFrame] = []
+    while True:
+        df = _pro_query(pro, api, limit=limit, offset=offset, **params)
+        if df is None or df.empty:
+            break
+        frames.append(df)
+        if int(len(df)) < limit:
+            break
+        offset += limit
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _post_stock_basic(df: pd.DataFrame) -> pd.DataFrame:
@@ -92,6 +158,40 @@ def _post_index_daily(df: pd.DataFrame) -> pd.DataFrame:
 def _post_st_list(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_yyyymmdd_date(df, "start_date")
     df = normalize_yyyymmdd_date(df, "end_date")
+    return df
+
+
+def _post_index_basic(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_yyyymmdd_date(df, "base_date")
+    df = normalize_yyyymmdd_date(df, "list_date")
+    df = normalize_yyyymmdd_date(df, "exp_date")
+    return df
+
+
+def _post_share_float(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_yyyymmdd_date(df, "ann_date")
+    df = normalize_yyyymmdd_date(df, "float_date")
+    return df
+
+
+def _post_dividend(df: pd.DataFrame) -> pd.DataFrame:
+    for c in [
+        "end_date",
+        "ann_date",
+        "record_date",
+        "ex_date",
+        "pay_date",
+        "div_listdate",
+        "imp_ann_date",
+        "base_date",
+    ]:
+        df = normalize_yyyymmdd_date(df, c)
+    return df
+
+
+def _post_index_member_all(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_yyyymmdd_date(df, "in_date")
+    df = normalize_yyyymmdd_date(df, "out_date")
     return df
 
 
@@ -185,6 +285,94 @@ def _fetch_index_daily_range(pro, sd: str, ed: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def _fetch_index_basic(_pro, _sd: str, _ed: str) -> pd.DataFrame:
+    # doc_id=94 index_basic
+    return _pro_query(_pro, "index_basic")
+
+
+def _fetch_index_classify(_pro, _sd: str, _ed: str) -> pd.DataFrame:
+    # doc_id=181 index_classify
+    # PDF里没有列出参数要求，默认不带参数调用；如遇到必填参数，可在这里补充。
+    return _pro_query(_pro, "index_classify")
+
+
+def _fetch_index_member_all(_pro, _sd: str, _ed: str) -> pd.DataFrame:
+    # doc_id=335 index_member_all: 单次最大2000行
+    return _pro_query_paged(_pro, "index_member_all", limit=2000, is_new="Y")
+
+
+def _fetch_index_weight_range(_pro, sd: str, ed: str) -> pd.DataFrame:
+    # doc_id=96 index_weight: 指数成分和权重（月度）。
+    # 为避免拉全市场指数导致数据爆炸，这里只抓取配置的指数代码集合。
+    env = _SETTINGS_ENV or {}
+    codes_raw = (env.get("INDEX_WEIGHT_CODES") or "").strip()
+    if not codes_raw:
+        return pd.DataFrame()
+    codes = [x.strip() for x in codes_raw.split(",") if x.strip()]
+    if not codes:
+        return pd.DataFrame()
+
+    start = pd.to_datetime(sd, format="%Y%m%d").date().replace(day=1)
+    end = pd.to_datetime(ed, format="%Y%m%d").date()
+
+    def month_start(d: date) -> date:
+        return d.replace(day=1)
+
+    def next_month(d: date) -> date:
+        if d.month == 12:
+            return date(d.year + 1, 1, 1)
+        return date(d.year, d.month + 1, 1)
+
+    frames: list[pd.DataFrame] = []
+    cur = month_start(start)
+    while cur <= end:
+        nm = next_month(cur)
+        rng_start = cur.strftime("%Y%m%d")
+        rng_end = (min(end, nm - timedelta(days=1))).strftime("%Y%m%d")
+        for code in codes:
+            df = _pro_query_paged(_pro, "index_weight", limit=LIMIT_MAX, index_code=code, start_date=rng_start, end_date=rng_end)
+            if df is not None and not df.empty:
+                frames.append(df)
+        cur = nm
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _fetch_share_float_range(_pro, sd: str, ed: str) -> pd.DataFrame:
+    # doc_id=160 share_float: 单次最大6000行
+    return _pro_query_paged(_pro, "share_float", limit=LIMIT_MAX, start_date=sd, end_date=ed)
+
+
+def _fetch_stk_limit_day(_pro, td: str) -> pd.DataFrame:
+    # doc_id=183 stk_limit: 单次最多约5800行
+    return _pro_query(_pro, "stk_limit", trade_date=td, limit=5800, offset=0)
+
+
+def _fetch_limit_list_d_day(_pro, td: str) -> pd.DataFrame:
+    # doc_id=298 limit_list_d: 单次最大2500行
+    frames: list[pd.DataFrame] = []
+    for lt in ["U", "D", "Z"]:
+        df = _pro_query_paged(_pro, "limit_list_d", limit=2500, trade_date=td, limit_type=lt)
+        if df is not None and not df.empty:
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _fetch_dividend_range(_pro, sd: str, ed: str) -> pd.DataFrame:
+    # doc_id=103 dividend：PDF里只有 ann_date/record_date/ex_date/imp_ann_date 等点查询参数
+    # 这里用 ann_date 按自然日循环，适合滚动窗口+增量，不建议一次性拉全历史。
+    start = pd.to_datetime(sd, format="%Y%m%d").date()
+    end = pd.to_datetime(ed, format="%Y%m%d").date()
+    frames: list[pd.DataFrame] = []
+    cur = start
+    while cur <= end:
+        ann = cur.strftime("%Y%m%d")
+        df = _pro_query_paged(_pro, "dividend", limit=LIMIT_MAX, ann_date=ann)
+        if df is not None and not df.empty:
+            frames.append(df)
+        cur += timedelta(days=1)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 MASTER_TABLES: dict[str, TableSpec] = {
     "stock_basic": TableSpec(
         table_name="stock_basic",
@@ -203,6 +391,35 @@ MASTER_TABLES: dict[str, TableSpec] = {
         by_trade_date=False,
         fetch_range=_fetch_trade_cal,
         post=_post_trade_cal,
+    ),
+    # Index metadata + classification (small tables; keep all rows).
+    "index_basic": TableSpec(
+        table_name="index_basic",
+        primary_keys=["ts_code"],
+        cursor_col=None,
+        retention_open_days=None,
+        by_trade_date=False,
+        fetch_range=_fetch_index_basic,
+        post=_post_index_basic,
+    ),
+    "index_classify": TableSpec(
+        table_name="index_classify",
+        primary_keys=["index_code"],
+        cursor_col=None,
+        retention_open_days=None,
+        by_trade_date=False,
+        fetch_range=_fetch_index_classify,
+        post=None,
+    ),
+    "index_member_all": TableSpec(
+        table_name="index_member_all",
+        # Minimal local DB: keep latest membership only; use (ts_code, l3_code) as stable non-null key.
+        primary_keys=["ts_code", "l3_code"],
+        cursor_col=None,
+        retention_open_days=None,
+        by_trade_date=False,
+        fetch_range=_fetch_index_member_all,
+        post=_post_index_member_all,
     ),
     # Keep last 500 open trading days
     "daily_raw": TableSpec(
@@ -231,6 +448,52 @@ MASTER_TABLES: dict[str, TableSpec] = {
         by_trade_date=False,  # few rows, range is fine
         fetch_range=_fetch_index_daily_range,
         post=_post_index_daily,
+    ),
+    "index_weight": TableSpec(
+        table_name="index_weight",
+        primary_keys=["index_code", "con_code", "trade_date"],
+        cursor_col="trade_date",
+        retention_open_days=2000,
+        by_trade_date=False,
+        fetch_range=_fetch_index_weight_range,
+        post=_post_trade_date,
+    ),
+    "stk_limit": TableSpec(
+        table_name="stk_limit",
+        primary_keys=["ts_code", "trade_date"],
+        cursor_col="trade_date",
+        retention_open_days=500,
+        by_trade_date=True,
+        fetch_day=_fetch_stk_limit_day,
+        post=_post_trade_date,
+    ),
+    "limit_list_d": TableSpec(
+        table_name="limit_list_d",
+        primary_keys=["ts_code", "trade_date", "limit"],
+        cursor_col="trade_date",
+        retention_open_days=500,
+        by_trade_date=True,
+        fetch_day=_fetch_limit_list_d_day,
+        post=_post_trade_date,
+    ),
+    "share_float": TableSpec(
+        table_name="share_float",
+        primary_keys=["ts_code", "ann_date", "float_date", "holder_name", "share_type"],
+        cursor_col="float_date",
+        retention_open_days=500,
+        by_trade_date=False,
+        fetch_range=_fetch_share_float_range,
+        post=_post_share_float,
+    ),
+    "dividend": TableSpec(
+        table_name="dividend",
+        # record_date/ex_date can be missing for未实施的预案; avoid nullable PK parts.
+        primary_keys=["ts_code", "ann_date", "end_date"],
+        cursor_col="ann_date",
+        retention_open_days=500,
+        by_trade_date=False,
+        fetch_range=_fetch_dividend_range,
+        post=_post_dividend,
     ),
     "moneyflow_ind": TableSpec(
         table_name="moneyflow_ind",
@@ -404,6 +667,7 @@ def update_table(
                 mx = series.max()
                 if isinstance(mx, date):
                     max_cursor = mx
+                    max_cursor_with_data = mx
                 else:
                     # If cursor col isn't a date type, store as str.
                     max_cursor = None
@@ -453,6 +717,10 @@ def update_table(
             date_col = "start_date"
         if spec.table_name == "trade_cal":
             date_col = "cal_date"
+        if spec.table_name == "share_float":
+            date_col = "float_date"
+        if spec.table_name == "dividend":
+            date_col = "ann_date"
         # Ensure index exists so retention deletes don't full-scan (saves RU).
         try:
             ensure_index(engine_master, spec.table_name, f"idx_{spec.table_name}_{date_col}", [date_col])

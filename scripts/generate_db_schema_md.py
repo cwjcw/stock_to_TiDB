@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Generate DB_SCHEMA.md by introspecting TiDB clusters.
+Generate schema docs by introspecting TiDB clusters and embedding into README.md.
 
 Requires a working .env with AS_MASTER / AS_5MIN_P1..P3 credentials.
 """
@@ -192,9 +192,17 @@ def _freq_for_table(table: str) -> tuple[str, str]:
         return ("5分钟", "增量：按游标逐交易日更新；默认只处理已收盘交易日")
     if table in {"daily_raw", "adj_factor", "moneyflow_ind", "moneyflow_sector", "moneyflow_mkt", "moneyflow_hsgt", "limit_list", "suspend_d"}:
         return ("日频", "增量：按游标逐交易日更新")
+    if table in {"stk_limit", "limit_list_d"}:
+        return ("日频", "增量：按游标逐交易日更新")
     if table in {"index_daily"}:
         return ("日频", "增量：按游标更新(范围抓取)")
+    if table in {"index_weight"}:
+        return ("月度", "增量：按月份范围抓取(按配置的指数集合)")
+    if table in {"share_float", "dividend"}:
+        return ("事件/区间", "增量：按日期范围循环抓取")
     if table in {"stock_basic"}:
+        return ("不定期", "建议每日/每周更新一次")
+    if table in {"index_basic", "index_classify", "index_member_all"}:
         return ("不定期", "建议每日/每周更新一次")
     if table in {"trade_cal"}:
         return ("日历", "建议每日更新")
@@ -211,14 +219,22 @@ def _source_for_table(table: str) -> str:
     src_map = {
         "stock_basic": "Tushare(stock_basic)",
         "trade_cal": "Tushare(trade_cal)",
+        "index_basic": "Tushare(index_basic)",
+        "index_classify": "Tushare(index_classify)",
+        "index_member_all": "Tushare(index_member_all)",
         "daily_raw": "Tushare(daily + daily_basic)",
         "adj_factor": "Tushare(adj_factor)",
         "index_daily": "Tushare(index_daily)",
+        "index_weight": "Tushare(index_weight)",
         "moneyflow_ind": "Tushare(moneyflow_dc)",
         "moneyflow_sector": "Tushare(moneyflow_ind_dc)",
         "moneyflow_mkt": "Tushare(moneyflow_mkt_dc)",
         "moneyflow_hsgt": "Tushare(moneyflow_hsgt)",
         "limit_list": "Tushare(limit_list)",
+        "stk_limit": "Tushare(stk_limit)",
+        "limit_list_d": "Tushare(limit_list_d)",
+        "share_float": "Tushare(share_float)",
+        "dividend": "Tushare(dividend)",
         "st_list": "Tushare(namechange)",
         "suspend_d": "Tushare(suspend_d)",
         "etl_state": "Internal(etl_state)",
@@ -229,9 +245,30 @@ def _source_for_table(table: str) -> str:
 def _retention_for_table(table: str) -> str:
     if table == "minute_5m":
         return "保留最近 250 个开市日(按 trade_time 删除)"
-    if table in {"daily_raw", "adj_factor", "index_daily", "moneyflow_ind", "moneyflow_sector", "moneyflow_mkt", "moneyflow_hsgt", "limit_list", "st_list", "suspend_d"}:
+    if table in {
+        "daily_raw",
+        "adj_factor",
+        "index_daily",
+        "moneyflow_ind",
+        "moneyflow_sector",
+        "moneyflow_mkt",
+        "moneyflow_hsgt",
+        "limit_list",
+        "stk_limit",
+        "limit_list_d",
+        "st_list",
+        "suspend_d",
+    }:
         return "保留最近 500 个开市日(按 trade_date/start_date 删除)"
+    if table in {"share_float"}:
+        return "保留最近 500 个开市日(按 float_date 删除)"
+    if table in {"dividend"}:
+        return "保留最近 500 个开市日(按 ann_date 删除)"
+    if table in {"index_weight"}:
+        return "保留最近 2000 个开市日(按 trade_date 删除)"
     if table in {"stock_basic", "trade_cal", "etl_state"}:
+        return "不做自动删除"
+    if table in {"index_basic", "index_classify", "index_member_all"}:
         return "不做自动删除"
     return "未知"
 
@@ -250,6 +287,11 @@ def _notes_for_table(table: str) -> list[str]:
     if table == "moneyflow_hsgt":
         return [
             "单位：万元（以 Tushare 当前返回为准）。",
+        ]
+    if table == "index_weight":
+        return [
+            "月度数据：建议按月设置 start_date/end_date（当月第一天与最后一天）。",
+            "本项目默认只抓取 `.env` 的 `INDEX_WEIGHT_CODES` 指定的指数集合。",
         ]
     return []
 
@@ -324,6 +366,9 @@ def _probe_master_columns(settings, *, probe_td: str) -> dict[str, list[str]]:
 
     out["trade_cal"] = q("trade_cal", exchange="SSE", start_date=probe_td, end_date=probe_td)
     out["stock_basic"] = q("stock_basic", exchange="", list_status="L")
+    out["index_basic"] = q("index_basic")
+    out["index_classify"] = q("index_classify")
+    out["index_member_all"] = q("index_member_all", ts_code=code, is_new="Y") or q("index_member_all", ts_code=code)
 
     # daily_raw = daily + daily_basic merged
     daily_cols = q("daily", ts_code=code, trade_date=probe_td) or q("daily", trade_date=probe_td)
@@ -343,6 +388,13 @@ def _probe_master_columns(settings, *, probe_td: str) -> dict[str, list[str]]:
     out["index_daily"] = q("index_daily", ts_code=idx, start_date=probe_td, end_date=probe_td) or q(
         "index_daily", start_date=probe_td, end_date=probe_td
     )
+    # index_weight needs index_code; pick from .env if possible, else fallback to CSI300.
+    try:
+        codes_raw = (settings.env.get("INDEX_WEIGHT_CODES") or "").strip()
+        index_code = (codes_raw.split(",")[0].strip() if codes_raw else "") or "000300.SH"
+    except Exception:
+        index_code = "000300.SH"
+    out["index_weight"] = q("index_weight", index_code=index_code, start_date=probe_td, end_date=probe_td)
 
     out["moneyflow_ind"] = q("moneyflow_dc", ts_code=code, trade_date=probe_td) or q("moneyflow_dc", trade_date=probe_td)
     out["moneyflow_sector"] = q("moneyflow_ind_dc", ts_code=code, trade_date=probe_td) or q("moneyflow_ind_dc", trade_date=probe_td)
@@ -350,6 +402,12 @@ def _probe_master_columns(settings, *, probe_td: str) -> dict[str, list[str]]:
     out["moneyflow_hsgt"] = q("moneyflow_hsgt", trade_date=probe_td)
 
     out["limit_list"] = q("limit_list", ts_code=code, trade_date=probe_td) or q("limit_list", trade_date=probe_td)
+    out["stk_limit"] = q("stk_limit", ts_code=code, trade_date=probe_td) or q("stk_limit", trade_date=probe_td)
+    out["limit_list_d"] = q("limit_list_d", trade_date=probe_td, limit_type="U") or q("limit_list_d", trade_date=probe_td)
+    out["share_float"] = q("share_float", ts_code=code, start_date=probe_td, end_date=probe_td) or q(
+        "share_float", start_date=probe_td, end_date=probe_td
+    )
+    out["dividend"] = q("dividend", ts_code=code, ann_date=probe_td) or q("dividend", ann_date=probe_td)
     out["suspend_d"] = q("suspend_d", ts_code=code, trade_date=probe_td) or q("suspend_d", trade_date=probe_td)
 
     out["st_list"] = q("namechange", ts_code=code, start_date=probe_td, end_date=probe_td) or q(
@@ -359,10 +417,43 @@ def _probe_master_columns(settings, *, probe_td: str) -> dict[str, list[str]]:
     return out
 
 
+def _bump_headings(md: str, bump: int = 1) -> str:
+    """
+    Embed a standalone markdown doc into another one by bumping heading levels.
+    """
+    out: list[str] = []
+    for line in md.splitlines():
+        if line.startswith("#"):
+            n = 0
+            while n < len(line) and line[n] == "#":
+                n += 1
+            if 1 <= n <= 6 and (n < len(line) and line[n] == " "):
+                nn = min(6, n + int(bump))
+                out.append("#" * nn + line[n:])
+                continue
+        out.append(line)
+    return "\n".join(out) + ("\n" if md.endswith("\n") else "")
+
+
+def _update_readme_block(*, repo_root: Path, schema_md: str) -> None:
+    begin = "<!-- BEGIN DB_SCHEMA -->"
+    end = "<!-- END DB_SCHEMA -->"
+    readme_path = repo_root / "README.md"
+    readme = readme_path.read_text(encoding="utf-8")
+
+    if begin in readme and end in readme and readme.index(begin) < readme.index(end):
+        pre = readme[: readme.index(begin) + len(begin)]
+        post = readme[readme.index(end) :]
+        new_text = pre.rstrip() + "\n\n" + schema_md.rstrip() + "\n\n" + post.lstrip()
+    else:
+        new_text = readme.rstrip() + "\n\n" + begin + "\n\n" + schema_md.rstrip() + "\n\n" + end + "\n"
+
+    readme_path.write_text(new_text, encoding="utf-8")
+
+
 def main() -> int:
     settings = load_settings()
     repo_root = Path(settings.repo_root)
-    out_path = repo_root / "DB_SCHEMA.md"
 
     clusters: list[ClusterName] = ["AS_MASTER", "AS_5MIN_P1", "AS_5MIN_P2", "AS_5MIN_P3"]
     cluster_tables: dict[str, dict[str, dict[str, Any]]] = {}
@@ -408,6 +499,10 @@ def main() -> int:
     for c in clusters:
         tbls = sorted(cluster_tables.get(c, {}).keys())
         lines.append(f"- `{c}`: {', '.join(f'`{t}`' for t in tbls) if tbls else '(无/连接失败)'}")
+    # Also show the logical AS_MASTER table set expected by code, to avoid doc drift even if tables aren't created yet.
+    master_actual_names = set(cluster_tables.get('AS_MASTER', {}).keys())
+    master_expected_names = sorted(set(MASTER_TABLES.keys()) | {'etl_state'} | master_actual_names)
+    lines.append(f"- `AS_MASTER(expected)`: {', '.join(f'`{t}`' for t in master_expected_names)}")
     lines.append("")
     if errors:
         lines.append("## 连接错误")
@@ -439,7 +534,10 @@ def main() -> int:
             info = tbls[t]
             lines.append(_render_table(cluster=c, table=t, cols=info["cols"], pks=info["pk"], exists=True))
 
-    out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    schema_doc = "\n".join(lines).rstrip() + "\n"
+    # README already has its own headings; embed schema as a nested section.
+    schema_doc = _bump_headings(schema_doc, bump=2)
+    _update_readme_block(repo_root=repo_root, schema_md=schema_doc)
     return 0
 
 

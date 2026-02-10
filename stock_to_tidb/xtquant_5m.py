@@ -20,7 +20,7 @@ from .trade_cal import cutoff_by_last_open_days, get_open_trade_dates, parse_dat
 
 
 def _find_xtquant_site_packages() -> Path | None:
-    # Default install path from your DB_SCHEMA.md.
+    # Default install path from your README schema section.
     base = Path(r"E:\Software\stock\gjzqqmt")
     if not base.exists():
         return None
