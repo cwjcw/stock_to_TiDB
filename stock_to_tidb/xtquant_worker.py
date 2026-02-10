@@ -147,7 +147,8 @@ def main(argv=None):
                 time.sleep(1.0)
                 continue
             raise
-    mkt = xtdata.get_market_data_ex(
+    # Use the documented API from "获取行情数据.pdf".
+    mkt = xtdata.get_market_data(
         # Explicit fields keeps returned structure more stable across QMT versions.
         field_list=["open", "high", "low", "close", "volume", "amount"],
         stock_list=codes,
