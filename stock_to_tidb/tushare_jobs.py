@@ -158,6 +158,7 @@ def _post_index_daily(df: pd.DataFrame) -> pd.DataFrame:
 def _post_st_list(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_yyyymmdd_date(df, "start_date")
     df = normalize_yyyymmdd_date(df, "end_date")
+    df = normalize_yyyymmdd_date(df, "ann_date")
     return df
 
 

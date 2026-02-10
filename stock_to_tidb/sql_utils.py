@@ -26,7 +26,13 @@ def df_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     for row in df.to_dict(orient="records"):
         clean: dict[str, Any] = {}
         for k, v in row.items():
-            if v is None or _is_nan(v):
+            # Pandas can produce NaT/NaN for missing values; DB drivers generally
+            # cannot bind NaT, so normalize all "missing" markers to None.
+            if v is None:
+                clean[k] = None
+            elif _is_nan(v):
+                clean[k] = None
+            elif pd.isna(v):
                 clean[k] = None
             else:
                 clean[k] = v
