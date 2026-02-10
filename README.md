@@ -52,6 +52,37 @@ Set-Location e:\New_Code\stock_to_TiDB
 .\venv\Scripts\python.exe scripts\backfill_master_500d.py --keep-open-days 500 --write-mode upsert
 ```
 
+## 5分钟线（全市场：国金QMT/xtquant）
+`minute_5m` 是全市场 5 分钟数据，按 `ts_code` 哈希路由分片写入 `AS_5MIN_P1/P2/P3`。
+
+前置条件：
+- 已配置 `.env` 的 TiDB + CA
+- QMT 行情服务可连接
+- `AS_MASTER.stock_basic` 和 `AS_MASTER.trade_cal` 已有数据（用来取全市场代码、计算保留窗口）
+
+```powershell
+# 确保元数据齐全（只需跑一次，之后增量即可）
+.\venv\Scripts\python.exe -m stock_to_tidb update --tables stock_basic,trade_cal
+```
+
+全市场回补（最近 250 个开市日，首次跑/修洞用）：
+
+```powershell
+.\venv\Scripts\python.exe scripts\backfill_5m_250d.py --keep-open-days 250 --write-mode ignore
+```
+
+全市场增量（日常每天跑一次；默认 `--resume`，只处理游标之后的交易日，然后删掉窗口外数据）：
+
+```powershell
+.\venv\Scripts\python.exe scripts\backfill_5m_250d.py
+```
+
+强制重跑窗口（会重置游标并重新回补整个窗口）：
+
+```powershell
+.\venv\Scripts\python.exe scripts\backfill_5m_250d.py --no-resume --reset-cursor
+```
+
 ## 说明
 当前实现覆盖 `DB_SCHEMA.md` 中的主要表，并做“循环增量 + 删除旧数据”：
 - 日线/资金流/风险类（`daily_raw/adj_factor/index_daily/moneyflow_*/limit_list/st_list/suspend_d`）：始终保留最近 **500 个交易日**，更老的数据会被删除
