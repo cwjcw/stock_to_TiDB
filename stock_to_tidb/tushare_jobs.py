@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from threading import Lock
 from typing import Any, Callable
+import sys
+from datetime import datetime
 
 import pandas as pd
 import tushare as ts
@@ -794,6 +796,10 @@ def update_master(
             tc_min_start = end_ref - timedelta(days=365 * years)
             tc_start = tc_min_start if (tc_start is None or tc_start > tc_min_start) else tc_start
 
+        # Progress log to stderr so CLI JSON output (stdout) remains machine-readable.
+        ts0 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts0}] updating AS_MASTER.{name} ...", file=sys.stderr, flush=True)
+
         res = update_table(
             settings=settings,
             engine_master=engine_master,
@@ -807,6 +813,13 @@ def update_master(
             no_delete=no_delete,
         )
         out.append(res)
+
+        ts1 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[{ts1}] done AS_MASTER.{name} fetched={res.get('rows_fetched')} affected={res.get('rows_affected')} deleted={res.get('rows_deleted')}",
+            file=sys.stderr,
+            flush=True,
+        )
     return out
 def _fetch_daily_day_codes(pro, td: str, ts_codes: list[str]) -> pd.DataFrame:
     frames = []
