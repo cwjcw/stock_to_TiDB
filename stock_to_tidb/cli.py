@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import date, datetime
+import faulthandler
+import signal
 
 from .env import load_settings
 from .tidb import load_tidb_config, make_engine
@@ -18,6 +20,14 @@ def _parse_date(s: str) -> date:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Help diagnose rare "hang" situations in production: `kill -USR1 <pid>`
+    # will print Python stack traces for all threads to stderr.
+    try:
+        faulthandler.enable()
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except Exception:
+        pass
+
     p = argparse.ArgumentParser(prog="stock_to_tidb")
     sub = p.add_subparsers(dest="cmd", required=True)
 
