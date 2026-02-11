@@ -139,7 +139,6 @@ def main() -> int:
         "moneyflow_sector",
         "moneyflow_mkt",
         "moneyflow_hsgt",
-        "limit_list",
         "suspend_d",
         "st_list",
         "index_daily",

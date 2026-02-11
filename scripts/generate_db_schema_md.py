@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
 Generate schema docs by introspecting TiDB clusters and embedding into README.md.
@@ -143,7 +143,7 @@ def cn_label(col: str) -> str:
         "sgt": "深股通净流入(万元)",
         "north_money": "北向资金净流入(万元)",
         "south_money": "南向资金净流入(万元)",
-        # limit_list common fields
+        # limit list common fields
         "amp": "振幅(%)",
         "fc_ratio": "封成比",
         "fl_ratio": "封流比",
@@ -190,7 +190,7 @@ def _freq_for_table(table: str) -> tuple[str, str]:
     """
     if table == "minute_5m":
         return ("5分钟", "增量：按游标逐交易日更新；默认只处理已收盘交易日")
-    if table in {"daily_raw", "adj_factor", "moneyflow_ind", "moneyflow_sector", "moneyflow_mkt", "moneyflow_hsgt", "limit_list", "suspend_d"}:
+    if table in {"daily_raw", "adj_factor", "moneyflow_ind", "moneyflow_sector", "moneyflow_mkt", "moneyflow_hsgt", "suspend_d"}:
         return ("日频", "增量：按游标逐交易日更新")
     if table in {"stk_limit", "limit_list_d"}:
         return ("日频", "增量：按游标逐交易日更新")
@@ -230,7 +230,6 @@ def _source_for_table(table: str) -> str:
         "moneyflow_sector": "Tushare(moneyflow_ind_dc)",
         "moneyflow_mkt": "Tushare(moneyflow_mkt_dc)",
         "moneyflow_hsgt": "Tushare(moneyflow_hsgt)",
-        "limit_list": "Tushare(limit_list)",
         "stk_limit": "Tushare(stk_limit)",
         "limit_list_d": "Tushare(limit_list_d)",
         "share_float": "Tushare(share_float)",
@@ -253,7 +252,6 @@ def _retention_for_table(table: str) -> str:
         "moneyflow_sector",
         "moneyflow_mkt",
         "moneyflow_hsgt",
-        "limit_list",
         "stk_limit",
         "limit_list_d",
         "st_list",
@@ -325,7 +323,6 @@ def _purpose_for_table(table: str) -> str:
         "suspend_d": "停复牌信息。用于可交易性过滤、回测约束与事件分析。",
         "st_list": "ST/更名等状态变更区间。用于风险过滤、退市/ST 策略约束与事件研究。",
         "stk_limit": "每日涨跌停价（上/下限）。用于回测可成交性约束、涨跌停风险控制。",
-        "limit_list": "涨跌停名单（旧接口）。用于涨跌停统计与情绪信号（建议优先使用 limit_list_d）。",
         "limit_list_d": "涨跌停/炸板名单（新接口，含连板/炸板统计）。用于情绪/打板/连板研究与风险控制。",
         "share_float": "限售股解禁。用于解禁冲击事件研究、供给压力因子与风险提示。",
         "dividend": "分红送股事件。用于分红/股息因子、除权除息事件回测、红利策略与现金流分配研究。",
@@ -438,7 +435,6 @@ def _probe_master_columns(settings, *, probe_td: str) -> dict[str, list[str]]:
     out["moneyflow_mkt"] = q("moneyflow_mkt_dc", trade_date=probe_td)
     out["moneyflow_hsgt"] = q("moneyflow_hsgt", trade_date=probe_td)
 
-    out["limit_list"] = q("limit_list", ts_code=code, trade_date=probe_td) or q("limit_list", trade_date=probe_td)
     out["stk_limit"] = q("stk_limit", ts_code=code, trade_date=probe_td) or q("stk_limit", trade_date=probe_td)
     out["limit_list_d"] = q("limit_list_d", trade_date=probe_td, limit_type="U") or q("limit_list_d", trade_date=probe_td)
     out["share_float"] = q("share_float", ts_code=code, start_date=probe_td, end_date=probe_td) or q(

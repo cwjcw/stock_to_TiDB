@@ -248,10 +248,6 @@ def _fetch_moneyflow_hsgt_day(pro, td: str) -> pd.DataFrame:
     return _pro_query(pro, "moneyflow_hsgt", trade_date=td)
 
 
-def _fetch_limit_list_day(pro, td: str) -> pd.DataFrame:
-    return _pro_query(pro, "limit_list", trade_date=td)
-
-
 def _fetch_suspend_d_day(pro, td: str) -> pd.DataFrame:
     return _pro_query(pro, "suspend_d", trade_date=td)
 
@@ -534,15 +530,6 @@ MASTER_TABLES: dict[str, TableSpec] = {
         fetch_day=_fetch_moneyflow_hsgt_day,
         post=_post_moneyflow_hsgt,
     ),
-    "limit_list": TableSpec(
-        table_name="limit_list",
-        primary_keys=["ts_code", "trade_date"],
-        cursor_col="trade_date",
-        retention_open_days=500,
-        by_trade_date=True,
-        fetch_day=_fetch_limit_list_day,
-        post=_post_trade_date,
-    ),
     "st_list": TableSpec(
         table_name="st_list",
         primary_keys=["ts_code", "start_date"],
@@ -627,11 +614,34 @@ def update_table(
         if spec.fetch_day is None:
             raise RuntimeError(f"{spec.table_name} is by_trade_date but fetch_day is missing")
         tds = get_open_trade_dates(engine_master, exchange=spec.exchange or "SSE", start=start, end=end)
+        # Progress log to stderr so CLI JSON output (stdout) remains machine-readable.
+        # These tables can be slow (many trade dates), so emit periodic logs for visibility.
+        try:
+            progress_every_td = int((settings.env.get("PROGRESS_LOG_EVERY_TD") or "20").strip())
+        except Exception:
+            progress_every_td = 20
+        try:
+            progress_interval_s = float((settings.env.get("PROGRESS_LOG_INTERVAL_S") or "30").strip())
+        except Exception:
+            progress_interval_s = 30.0
+        progress_every_td = max(1, progress_every_td)
+        progress_interval_s = max(5.0, progress_interval_s)
+
+        start_ts = time.monotonic()
+        last_log_ts = start_ts
+        total = int(len(tds))
+        ts0 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[{ts0}] AS_MASTER.{spec.table_name} by_trade_date start={start.isoformat()} end={end.isoformat()} trade_dates={total}",
+            file=sys.stderr,
+            flush=True,
+        )
+
         # Batch multiple trade_dates into one upsert to reduce RU (fewer transactions).
         buf: list[pd.DataFrame] = []
         buf_rows = 0
         flush_rows = 50000
-        for d in tds:
+        for i, d in enumerate(tds, start=1):
             td = date_to_yyyymmdd(d)
             if spec.table_name == "daily_raw" and ts_codes:
                 daily = _fetch_daily_day_codes(pro, td, ts_codes)
@@ -653,6 +663,31 @@ def update_table(
                 affected += int(upsert_df(engine_master, spec.table_name, all_df, spec.primary_keys, mode=write_mode))
                 buf = []
                 buf_rows = 0
+
+                # Log flushes since they can be large and take time.
+                now = time.monotonic()
+                tsf = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                elapsed_s = int(now - start_ts)
+                print(
+                    f"[{tsf}] AS_MASTER.{spec.table_name} flush i={i}/{total} td={td} rows={rows} affected={affected} elapsed_s={elapsed_s}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                last_log_ts = now
+
+            # Periodic progress logs (not too chatty).
+            now = time.monotonic()
+            if i == total or (i % progress_every_td == 0) or (now - last_log_ts >= progress_interval_s):
+                tsp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                elapsed_s = max(1.0, now - start_ts)
+                rate = float(i) / elapsed_s
+                eta_s = int((total - i) / rate) if rate > 0 else -1
+                print(
+                    f"[{tsp}] AS_MASTER.{spec.table_name} progress i={i}/{total} td={td} rows={rows} buf_rows={buf_rows} elapsed_s={int(elapsed_s)} eta_s={eta_s}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                last_log_ts = now
         if buf_rows > 0:
             all_df = pd.concat(buf, ignore_index=True)
             affected += int(upsert_df(engine_master, spec.table_name, all_df, spec.primary_keys, mode=write_mode))
@@ -678,12 +713,13 @@ def update_table(
     # Update cursor.
     cursor_value = None
     if spec.cursor_col:
-        # Only advance cursor when we actually saw data for at least one trading day.
-        # Otherwise, keep previous cursor so a transient API issue doesn't "skip" data forever.
+        # Cursor rules:
+        # - If we saw any data with a usable cursor value, advance to that max.
+        # - Else if we wrote rows but cannot infer a cursor value (range-based without cursor col), advance to `end`.
+        # - Else keep previous cursor so transient API issues don't "skip" data forever.
         if max_cursor_with_data is not None:
             cursor_value = max_cursor_with_data.isoformat()
-        elif end is not None and cur_raw is None:
-            # If we cannot infer max cursor (range-based but cursor col not parsed), store end.
+        elif rows > 0:
             cursor_value = end.isoformat()
         else:
             cursor_value = cur_raw
@@ -696,7 +732,9 @@ def update_table(
                     cursor_value = cur_date.isoformat()
             except Exception:
                 pass
-        set_cursor(engine_master, cluster, spec.table_name, spec.cursor_col, cursor_value)
+        # Avoid creating a state row with NULL cursor_value on a first run that fetched nothing.
+        if cursor_value is not None or cur_raw is not None:
+            set_cursor(engine_master, cluster, spec.table_name, spec.cursor_col, cursor_value)
 
     # Enforce retention (delete old).
     deleted = 0

@@ -87,7 +87,7 @@ Set-Location e:\New_Code\stock_to_TiDB
 
 ## 说明
 当前实现覆盖本 README 的“数据库表结构（自动生成）”中的主要表，并做“循环增量 + 删除旧数据”：
-- 日频滚动窗口类（`daily_raw/adj_factor/index_daily/moneyflow_*/limit_list/limit_list_d/stk_limit/st_list/suspend_d/share_float/dividend`）：默认始终保留最近 **500 个交易日**（`index_weight` 默认保留最近 **2000 个交易日**）
+- 日频滚动窗口类（`daily_raw/adj_factor/index_daily/moneyflow_*/limit_list_d/stk_limit/st_list/suspend_d/share_float/dividend`）：默认始终保留最近 **500 个交易日**（`index_weight` 默认保留最近 **2000 个交易日**）
 - 5分钟线（`minute_5m`）：默认始终保留最近 **250 个交易日**
 
 删除规则是“按交易日窗口裁剪”，不是清空历史：程序会从 `trade_cal` 计算出“最近 N 个开市交易日”中的最早日期 `cutoff`，然后执行 `DELETE ... WHERE trade_date < cutoff`（5分钟线用 `trade_time < cutoff 00:00:00`）。
@@ -119,7 +119,7 @@ Set-Location e:\New_Code\stock_to_TiDB
 - `AS_5MIN_P1`: `etl_state`, `minute_5m`
 - `AS_5MIN_P2`: `etl_state`, `minute_5m`
 - `AS_5MIN_P3`: `etl_state`, `minute_5m`
-- `AS_MASTER(expected)`: `adj_factor`, `daily_raw`, `dividend`, `etl_state`, `index_basic`, `index_classify`, `index_daily`, `index_member_all`, `index_weight`, `limit_list`, `limit_list_d`, `moneyflow_hsgt`, `moneyflow_ind`, `moneyflow_mkt`, `moneyflow_sector`, `share_float`, `st_list`, `stk_limit`, `stock_basic`, `suspend_d`, `trade_cal`
+- `AS_MASTER(expected)`: `adj_factor`, `daily_raw`, `dividend`, `etl_state`, `index_basic`, `index_classify`, `index_daily`, `index_member_all`, `index_weight`, `limit_list_d`, `moneyflow_hsgt`, `moneyflow_ind`, `moneyflow_mkt`, `moneyflow_sector`, `share_float`, `st_list`, `stk_limit`, `stock_basic`, `suspend_d`, `trade_cal`
 
 #### 表用途速查
 
@@ -134,7 +134,6 @@ Set-Location e:\New_Code\stock_to_TiDB
 - `index_daily`: 指数日线行情。用于基准对比、指数择时、指数增强评估。
 - `index_member_all`: 申万行业成分映射（股票属于哪个行业/分级）。用于行业轮动、行业中性、多因子分组。
 - `index_weight`: 指数成分与权重（月度）。用于指数增强、成分约束组合、指数复刻与归因。
-- `limit_list`: 涨跌停名单（旧接口）。用于涨跌停统计与情绪信号（建议优先使用 limit_list_d）。
 - `limit_list_d`: 涨跌停/炸板名单（新接口，含连板/炸板统计）。用于情绪/打板/连板研究与风险控制。
 - `moneyflow_hsgt`: 沪深港通资金流向（北向/南向净流入）。用于风格/风险开关、资金面择时。
 - `moneyflow_ind`: 个股/行业资金流向（按 Tushare 口径）。用于资金驱动选股、拥挤度/风格切换。
@@ -340,31 +339,6 @@ Set-Location e:\New_Code\stock_to_TiDB
 | `con_code` | 同英文(con_code) | `-` | YES |
 | `trade_date` | 交易日期 | `-` | YES |
 | `weight` | 同英文(weight) | `-` | YES |
-
-##### limit_list  (AS_MASTER)
-- **数据源**：Tushare(limit_list)
-- **频率(数据粒度)**：日频
-- **更新频率(建议)**：增量：按游标逐交易日更新
-- **保留策略**：保留最近 500 个开市日(按 trade_date/start_date 删除)
-- **已建表**：否(尚未落库，字段来自接口探测/约定)
-- **主键**：`(ts_code, trade_date)`
-
-| Column (EN) | 字段(中文) | Type | Null |
-|---|---|---:|:---:|
-| `trade_date` | 交易日期 | `-` | YES |
-| `ts_code` | 证券代码 | `-` | YES |
-| `name` | 名称 | `-` | YES |
-| `close` | 收盘价 | `-` | YES |
-| `pct_chg` | 涨跌幅(%) | `-` | YES |
-| `amp` | 振幅(%) | `-` | YES |
-| `fc_ratio` | 封成比 | `-` | YES |
-| `fl_ratio` | 封流比 | `-` | YES |
-| `fd_amount` | 封单金额 | `-` | YES |
-| `first_time` | 首次涨跌停时间 | `-` | YES |
-| `last_time` | 最后涨跌停时间 | `-` | YES |
-| `open_times` | 打开次数 | `-` | YES |
-| `strth` | 强度 | `-` | YES |
-| `limit` | 涨跌停标志 | `-` | YES |
 
 ##### limit_list_d  (AS_MASTER)
 - **数据源**：Tushare(limit_list_d)
