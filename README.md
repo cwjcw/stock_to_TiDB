@@ -109,17 +109,43 @@ Set-Location e:\New_Code\stock_to_TiDB
 
 ### 量化交易数据库表结构（自动生成）
 
-- 生成时间：2026-02-10 23:39:41
+- 生成时间：2026-02-11 08:35:16
 - 说明：字段名(EN)来自实际 TiDB 表结构；中文字段名为本项目约定的解释或自动推断。
 - 设计原则：除明确的字段改名/单位换算外，其余字段保持与源接口一致。
 
 #### 集群与表概览
 
-- `AS_MASTER`: `adj_factor`, `daily_raw`, `etl_state`, `index_daily`, `moneyflow_hsgt`, `moneyflow_ind`, `moneyflow_mkt`, `moneyflow_sector`, `st_list`, `stock_basic`, `suspend_d`, `trade_cal`
+- `AS_MASTER`: `adj_factor`, `daily_raw`, `etl_state`, `index_basic`, `index_classify`, `index_daily`, `index_member_all`, `moneyflow_hsgt`, `moneyflow_ind`, `moneyflow_mkt`, `moneyflow_sector`, `st_list`, `stock_basic`, `suspend_d`, `trade_cal`
 - `AS_5MIN_P1`: `etl_state`, `minute_5m`
 - `AS_5MIN_P2`: `etl_state`, `minute_5m`
 - `AS_5MIN_P3`: `etl_state`, `minute_5m`
 - `AS_MASTER(expected)`: `adj_factor`, `daily_raw`, `dividend`, `etl_state`, `index_basic`, `index_classify`, `index_daily`, `index_member_all`, `index_weight`, `limit_list`, `limit_list_d`, `moneyflow_hsgt`, `moneyflow_ind`, `moneyflow_mkt`, `moneyflow_sector`, `share_float`, `st_list`, `stk_limit`, `stock_basic`, `suspend_d`, `trade_cal`
+
+#### 表用途速查
+
+下面是每张表的用途说明（先看用途再看字段，方便你判断是否需要常驻落库）。
+
+- `adj_factor`: 复权因子。用于前复权/后复权价格序列、复权收益计算。
+- `daily_raw`: A股日线行情 + 每日指标（合并表）。用于技术面/因子研究、回测与风控。
+- `dividend`: 分红送股事件。用于分红/股息因子、除权除息事件回测、红利策略与现金流分配研究。
+- `etl_state`: ETL 游标状态：记录每张表抓取到哪一天。用于增量更新与断点续跑。
+- `index_basic`: 指数基础信息维表。用于指数池管理、发布方/类别筛选、指数元数据查询。
+- `index_classify`: 申万行业分类字典（行业代码与层级）。用于行业维度分析与行业中性化。
+- `index_daily`: 指数日线行情。用于基准对比、指数择时、指数增强评估。
+- `index_member_all`: 申万行业成分映射（股票属于哪个行业/分级）。用于行业轮动、行业中性、多因子分组。
+- `index_weight`: 指数成分与权重（月度）。用于指数增强、成分约束组合、指数复刻与归因。
+- `limit_list`: 涨跌停名单（旧接口）。用于涨跌停统计与情绪信号（建议优先使用 limit_list_d）。
+- `limit_list_d`: 涨跌停/炸板名单（新接口，含连板/炸板统计）。用于情绪/打板/连板研究与风险控制。
+- `moneyflow_hsgt`: 沪深港通资金流向（北向/南向净流入）。用于风格/风险开关、资金面择时。
+- `moneyflow_ind`: 个股/行业资金流向（按 Tushare 口径）。用于资金驱动选股、拥挤度/风格切换。
+- `moneyflow_mkt`: 全市场资金流向统计。用于市场情绪与资金面监控。
+- `moneyflow_sector`: 板块/概念维度资金流向（按 Tushare 口径）。用于主题轮动与资金扩散分析。
+- `share_float`: 限售股解禁。用于解禁冲击事件研究、供给压力因子与风险提示。
+- `st_list`: ST/更名等状态变更区间。用于风险过滤、退市/ST 策略约束与事件研究。
+- `stk_limit`: 每日涨跌停价（上/下限）。用于回测可成交性约束、涨跌停风险控制。
+- `stock_basic`: 股票基础信息维表：代码、名称、行业、上市日期等。用于全市场股票池、行业分组、数据对齐。
+- `suspend_d`: 停复牌信息。用于可交易性过滤、回测约束与事件分析。
+- `trade_cal`: 交易日历维表：开市/休市、上一交易日。用于滚动窗口、按交易日回补、避免自然日偏差。
 
 #### AS_MASTER
 
@@ -222,37 +248,37 @@ Set-Location e:\New_Code\stock_to_TiDB
 - **频率(数据粒度)**：不定期
 - **更新频率(建议)**：建议每日/每周更新一次
 - **保留策略**：不做自动删除
-- **已建表**：否(尚未落库，字段来自接口探测/约定)
+- **已建表**：是
 - **主键**：`(ts_code)`
 
 | Column (EN) | 字段(中文) | Type | Null |
 |---|---|---:|:---:|
-| `ts_code` | 证券代码 | `-` | YES |
-| `name` | 名称 | `-` | YES |
-| `market` | 市场 | `-` | YES |
-| `publisher` | 同英文(publisher) | `-` | YES |
-| `category` | 同英文(category) | `-` | YES |
-| `base_date` | 同英文(base_date) | `-` | YES |
-| `base_point` | 同英文(base_point) | `-` | YES |
-| `list_date` | 上市日期 | `-` | YES |
+| `ts_code` | 证券代码 | `VARCHAR(32)` | NO |
+| `name` | 名称 | `VARCHAR(64)` | YES |
+| `market` | 市场 | `VARCHAR(32)` | YES |
+| `publisher` | 同英文(publisher) | `VARCHAR(64)` | YES |
+| `category` | 同英文(category) | `VARCHAR(64)` | YES |
+| `base_date` | 同英文(base_date) | `DATE` | YES |
+| `base_point` | 同英文(base_point) | `FLOAT` | YES |
+| `list_date` | 上市日期 | `DATE` | YES |
 
 ##### index_classify  (AS_MASTER)
 - **数据源**：Tushare(index_classify)
 - **频率(数据粒度)**：不定期
 - **更新频率(建议)**：建议每日/每周更新一次
 - **保留策略**：不做自动删除
-- **已建表**：否(尚未落库，字段来自接口探测/约定)
+- **已建表**：是
 - **主键**：`(index_code)`
 
 | Column (EN) | 字段(中文) | Type | Null |
 |---|---|---:|:---:|
-| `index_code` | 同英文(index_code) | `-` | YES |
-| `industry_name` | 行业名称 | `-` | YES |
-| `level` | 同英文(level) | `-` | YES |
-| `industry_code` | 行业代码 | `-` | YES |
-| `is_pub` | 同英文(is_pub) | `-` | YES |
-| `parent_code` | 同英文(parent_code) | `-` | YES |
-| `src` | 同英文(src) | `-` | YES |
+| `index_code` | 同英文(index_code) | `VARCHAR(64)` | NO |
+| `industry_name` | 行业名称 | `VARCHAR(64)` | YES |
+| `level` | 同英文(level) | `VARCHAR(64)` | YES |
+| `industry_code` | 行业代码 | `VARCHAR(64)` | YES |
+| `is_pub` | 同英文(is_pub) | `VARCHAR(64)` | YES |
+| `parent_code` | 同英文(parent_code) | `VARCHAR(64)` | YES |
+| `src` | 同英文(src) | `VARCHAR(64)` | YES |
 
 ##### index_daily  (AS_MASTER)
 - **数据源**：Tushare(index_daily)
@@ -281,22 +307,22 @@ Set-Location e:\New_Code\stock_to_TiDB
 - **频率(数据粒度)**：不定期
 - **更新频率(建议)**：建议每日/每周更新一次
 - **保留策略**：不做自动删除
-- **已建表**：否(尚未落库，字段来自接口探测/约定)
-- **主键**：`(ts_code, l3_code)`
+- **已建表**：是
+- **主键**：`(l3_code, ts_code)`
 
 | Column (EN) | 字段(中文) | Type | Null |
 |---|---|---:|:---:|
-| `l1_code` | 同英文(l1_code) | `-` | YES |
-| `l1_name` | 同英文(l1_name) | `-` | YES |
-| `l2_code` | 同英文(l2_code) | `-` | YES |
-| `l2_name` | 同英文(l2_name) | `-` | YES |
-| `l3_code` | 同英文(l3_code) | `-` | YES |
-| `l3_name` | 同英文(l3_name) | `-` | YES |
-| `ts_code` | 证券代码 | `-` | YES |
-| `name` | 名称 | `-` | YES |
-| `in_date` | 同英文(in_date) | `-` | YES |
-| `out_date` | 同英文(out_date) | `-` | YES |
-| `is_new` | 同英文(is_new) | `-` | YES |
+| `l1_code` | 同英文(l1_code) | `VARCHAR(64)` | YES |
+| `l1_name` | 同英文(l1_name) | `VARCHAR(64)` | YES |
+| `l2_code` | 同英文(l2_code) | `VARCHAR(64)` | YES |
+| `l2_name` | 同英文(l2_name) | `VARCHAR(64)` | YES |
+| `l3_code` | 同英文(l3_code) | `VARCHAR(64)` | NO |
+| `l3_name` | 同英文(l3_name) | `VARCHAR(64)` | YES |
+| `ts_code` | 证券代码 | `VARCHAR(32)` | NO |
+| `name` | 名称 | `VARCHAR(64)` | YES |
+| `in_date` | 同英文(in_date) | `DATE` | YES |
+| `out_date` | 同英文(out_date) | `DATE` | YES |
+| `is_new` | 同英文(is_new) | `VARCHAR(64)` | YES |
 
 ##### index_weight  (AS_MASTER)
 - **数据源**：Tushare(index_weight)

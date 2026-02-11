@@ -769,6 +769,15 @@ def update_master(
             ordered.append(t)
 
     out = []
+    # Ensure trade_cal has enough history to compute retention cutoffs for *all* selected tables.
+    # Approximation: 1 open day ~= 2 calendar days; add an extra buffer.
+    max_keep_open_days = 0
+    for t in ordered:
+        spec = MASTER_TABLES.get(t)
+        if spec is None:
+            continue
+        if spec.retention_open_days:
+            max_keep_open_days = max(max_keep_open_days, int(spec.retention_open_days))
     for name in ordered:
         spec = MASTER_TABLES.get(name)
         if spec is None:
@@ -778,9 +787,11 @@ def update_master(
         # Ignore user `since` if it would make trade_cal too short.
         tc_start = start_date
         if name == "trade_cal":
-            # 5y is plenty to compute 500 open trading days.
-            tc_min_start = end_date or date.today()
-            tc_min_start = tc_min_start - timedelta(days=365 * 5)
+            # Default to 5y, but extend when other tables require longer retention windows (e.g. 2000 open days).
+            # calendar_years ~= keep_open_days/250 trading_days_per_year, plus buffer.
+            end_ref = end_date or date.today()
+            years = max(5, int(max_keep_open_days / 200) + 2) if max_keep_open_days > 0 else 5
+            tc_min_start = end_ref - timedelta(days=365 * years)
             tc_start = tc_min_start if (tc_start is None or tc_start > tc_min_start) else tc_start
 
         res = update_table(

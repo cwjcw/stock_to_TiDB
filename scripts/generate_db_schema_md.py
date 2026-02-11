@@ -296,6 +296,43 @@ def _notes_for_table(table: str) -> list[str]:
     return []
 
 
+def _purpose_for_table(table: str) -> str:
+    """
+    A short, user-facing explanation of what the table is for (strategy/analytics use cases).
+    Keep this stable and concise; it's rendered into README.
+    """
+    m = {
+        # meta / calendar
+        "stock_basic": "股票基础信息维表：代码、名称、行业、上市日期等。用于全市场股票池、行业分组、数据对齐。",
+        "trade_cal": "交易日历维表：开市/休市、上一交易日。用于滚动窗口、按交易日回补、避免自然日偏差。",
+        "etl_state": "ETL 游标状态：记录每张表抓取到哪一天。用于增量更新与断点续跑。",
+        # daily / intraday
+        "daily_raw": "A股日线行情 + 每日指标（合并表）。用于技术面/因子研究、回测与风控。",
+        "adj_factor": "复权因子。用于前复权/后复权价格序列、复权收益计算。",
+        "minute_5m": "5分钟K线（来自 QMT/xtquant）。用于日内策略、短线择时与更细粒度回测。",
+        # index / industry
+        "index_basic": "指数基础信息维表。用于指数池管理、发布方/类别筛选、指数元数据查询。",
+        "index_daily": "指数日线行情。用于基准对比、指数择时、指数增强评估。",
+        "index_classify": "申万行业分类字典（行业代码与层级）。用于行业维度分析与行业中性化。",
+        "index_member_all": "申万行业成分映射（股票属于哪个行业/分级）。用于行业轮动、行业中性、多因子分组。",
+        "index_weight": "指数成分与权重（月度）。用于指数增强、成分约束组合、指数复刻与归因。",
+        # flows
+        "moneyflow_hsgt": "沪深港通资金流向（北向/南向净流入）。用于风格/风险开关、资金面择时。",
+        "moneyflow_mkt": "全市场资金流向统计。用于市场情绪与资金面监控。",
+        "moneyflow_ind": "个股/行业资金流向（按 Tushare 口径）。用于资金驱动选股、拥挤度/风格切换。",
+        "moneyflow_sector": "板块/概念维度资金流向（按 Tushare 口径）。用于主题轮动与资金扩散分析。",
+        # risk / events / constraints
+        "suspend_d": "停复牌信息。用于可交易性过滤、回测约束与事件分析。",
+        "st_list": "ST/更名等状态变更区间。用于风险过滤、退市/ST 策略约束与事件研究。",
+        "stk_limit": "每日涨跌停价（上/下限）。用于回测可成交性约束、涨跌停风险控制。",
+        "limit_list": "涨跌停名单（旧接口）。用于涨跌停统计与情绪信号（建议优先使用 limit_list_d）。",
+        "limit_list_d": "涨跌停/炸板名单（新接口，含连板/炸板统计）。用于情绪/打板/连板研究与风险控制。",
+        "share_float": "限售股解禁。用于解禁冲击事件研究、供给压力因子与风险提示。",
+        "dividend": "分红送股事件。用于分红/股息因子、除权除息事件回测、红利策略与现金流分配研究。",
+    }
+    return m.get(table, "用途：通用数据表。用于回测、分析或风控（详见数据源接口说明）。")
+
+
 def _render_table(*, cluster: str, table: str, cols: list[ColInfo], pks: list[str], exists: bool) -> str:
     src_freq, upd_freq = _freq_for_table(table)
     md: list[str] = []
@@ -503,6 +540,14 @@ def main() -> int:
     master_actual_names = set(cluster_tables.get('AS_MASTER', {}).keys())
     master_expected_names = sorted(set(MASTER_TABLES.keys()) | {'etl_state'} | master_actual_names)
     lines.append(f"- `AS_MASTER(expected)`: {', '.join(f'`{t}`' for t in master_expected_names)}")
+    lines.append("")
+
+    lines.append("## 表用途速查")
+    lines.append("")
+    lines.append("下面是每张表的用途说明（先看用途再看字段，方便你判断是否需要常驻落库）。")
+    lines.append("")
+    for t in master_expected_names:
+        lines.append(f"- `{t}`: {_purpose_for_table(t)}")
     lines.append("")
     if errors:
         lines.append("## 连接错误")
