@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import signal
 from collections import deque
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -53,6 +54,34 @@ class RateLimiter:
 
 _RATE_LIMITER: RateLimiter | None = None
 _SETTINGS_ENV: dict[str, str] | None = None
+_TUSHARE_QUERY_TIMEOUT_S: float = 45.0
+
+
+def _on_tushare_retry(retry_state) -> None:
+    # Log concise retry context to pinpoint which day/type is stalling.
+    try:
+        args = tuple(getattr(retry_state, "args", ()) or ())
+        kwargs = dict(getattr(retry_state, "kwargs", {}) or {})
+        api = str(args[1]) if len(args) > 1 else "unknown_api"
+        attempt = int(getattr(retry_state, "attempt_number", 0) or 0)
+        next_sleep_s = None
+        na = getattr(retry_state, "next_action", None)
+        if na is not None:
+            next_sleep_s = getattr(na, "sleep", None)
+        exc = retry_state.outcome.exception() if retry_state.outcome is not None else None
+        fields = [f"api={api}", f"attempt={attempt}"]
+        for k in ["trade_date", "start_date", "end_date", "limit_type", "offset", "limit", "ts_code", "index_code"]:
+            v = kwargs.get(k)
+            if v not in (None, ""):
+                fields.append(f"{k}={v}")
+        if exc is not None:
+            fields.append(f"err={type(exc).__name__}:{exc}")
+        if next_sleep_s is not None:
+            fields.append(f"next_sleep_s={float(next_sleep_s):.1f}")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] TUSHARE retry {' '.join(fields)}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 def make_pro(settings: Settings):
@@ -64,16 +93,37 @@ def make_pro(settings: Settings):
         max_cpm = int((settings.env.get("TUSHARE_MAX_CALLS_PER_MIN") or "300").strip())
     except Exception:
         max_cpm = 300
+    global _TUSHARE_QUERY_TIMEOUT_S
+    try:
+        _TUSHARE_QUERY_TIMEOUT_S = float((settings.env.get("TUSHARE_QUERY_TIMEOUT_S") or "45").strip())
+    except Exception:
+        _TUSHARE_QUERY_TIMEOUT_S = 45.0
+    _TUSHARE_QUERY_TIMEOUT_S = max(5.0, _TUSHARE_QUERY_TIMEOUT_S)
     if _RATE_LIMITER is None or getattr(_RATE_LIMITER, "_max", None) != max_cpm:
         _RATE_LIMITER = RateLimiter(max_calls_per_minute=max_cpm)
     return ts.pro_api()
 
 
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=20))
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=20), before_sleep=_on_tushare_retry)
 def _pro_query(pro, api: str, **params) -> pd.DataFrame:
     if _RATE_LIMITER is not None:
         _RATE_LIMITER.wait()
-    return pro.query(api, **params)
+    timeout_s = float(_TUSHARE_QUERY_TIMEOUT_S or 0.0)
+    if timeout_s <= 0:
+        return pro.query(api, **params)
+
+    # Guard against upstream sockets hanging forever.
+    def _raise_timeout(_signum, _frame):
+        raise TimeoutError(f"Tushare query timeout api={api} timeout_s={timeout_s}")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return pro.query(api, **params)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 @dataclass(frozen=True)
@@ -350,7 +400,16 @@ def _fetch_limit_list_d_day(_pro, td: str) -> pd.DataFrame:
     # doc_id=298 limit_list_d: 单次最大2500行
     frames: list[pd.DataFrame] = []
     for lt in ["U", "D", "Z"]:
-        df = _pro_query_paged(_pro, "limit_list_d", limit=2500, trade_date=td, limit_type=lt)
+        try:
+            df = _pro_query_paged(_pro, "limit_list_d", limit=2500, trade_date=td, limit_type=lt)
+        except Exception as ex:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[{ts}] AS_MASTER.limit_list_d fetch_failed trade_date={td} limit_type={lt} err={type(ex).__name__}:{ex}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
         if df is not None and not df.empty:
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
