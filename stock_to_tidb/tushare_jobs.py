@@ -689,8 +689,22 @@ def update_table(
                 )
                 last_log_ts = now
         if buf_rows > 0:
+            tsf0 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            elapsed_s = int(time.monotonic() - start_ts)
+            print(
+                f"[{tsf0}] AS_MASTER.{spec.table_name} final_flush rows={buf_rows} elapsed_s={elapsed_s}",
+                file=sys.stderr,
+                flush=True,
+            )
             all_df = pd.concat(buf, ignore_index=True)
             affected += int(upsert_df(engine_master, spec.table_name, all_df, spec.primary_keys, mode=write_mode))
+            tsf1 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            elapsed_s = int(time.monotonic() - start_ts)
+            print(
+                f"[{tsf1}] AS_MASTER.{spec.table_name} final_flush_done affected={affected} elapsed_s={elapsed_s}",
+                file=sys.stderr,
+                flush=True,
+            )
     else:
         if spec.fetch_range is None:
             raise RuntimeError(f"{spec.table_name} is range-based but fetch_range is missing")
@@ -739,6 +753,12 @@ def update_table(
     # Enforce retention (delete old).
     deleted = 0
     if (not no_delete) and cutoff and spec.retention_open_days:
+        tsr0 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[{tsr0}] AS_MASTER.{spec.table_name} retention cutoff={cutoff.isoformat()} start",
+            file=sys.stderr,
+            flush=True,
+        )
         # If table was never created (e.g. upstream returned empty frames), skip retention delete.
         if not inspect(engine_master).has_table(spec.table_name):
             return {
@@ -764,10 +784,28 @@ def update_table(
             date_col = "ann_date"
         # Ensure index exists so retention deletes don't full-scan (saves RU).
         try:
+            tsi0 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[{tsi0}] AS_MASTER.{spec.table_name} ensuring index idx_{spec.table_name}_{date_col} ...",
+                file=sys.stderr,
+                flush=True,
+            )
             ensure_index(engine_master, spec.table_name, f"idx_{spec.table_name}_{date_col}", [date_col])
+            tsi1 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[{tsi1}] AS_MASTER.{spec.table_name} ensure_index done",
+                file=sys.stderr,
+                flush=True,
+            )
         except Exception:
             pass
         deleted = delete_older_than_chunked(engine_master, spec.table_name, date_col, cutoff)
+        tsr1 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[{tsr1}] AS_MASTER.{spec.table_name} retention done deleted={int(deleted)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return {
         "table": spec.table_name,
