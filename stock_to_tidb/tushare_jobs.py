@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import signal
+import requests
 from collections import deque
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -12,7 +13,7 @@ from datetime import datetime
 
 import pandas as pd
 import tushare as ts
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 from sqlalchemy import inspect
 
 from .env import Settings
@@ -55,6 +56,7 @@ class RateLimiter:
 _RATE_LIMITER: RateLimiter | None = None
 _SETTINGS_ENV: dict[str, str] | None = None
 _TUSHARE_QUERY_TIMEOUT_S: float = 45.0
+_REQUESTS_TIMEOUT_PATCHED: bool = False
 
 
 def _on_tushare_retry(retry_state) -> None:
@@ -99,6 +101,17 @@ def make_pro(settings: Settings):
     except Exception:
         _TUSHARE_QUERY_TIMEOUT_S = 45.0
     _TUSHARE_QUERY_TIMEOUT_S = max(5.0, _TUSHARE_QUERY_TIMEOUT_S)
+    global _REQUESTS_TIMEOUT_PATCHED
+    if not _REQUESTS_TIMEOUT_PATCHED:
+        orig_request = requests.sessions.Session.request
+
+        def _request_with_default_timeout(self, method, url, **kwargs):
+            # Ensure all HTTP calls have a timeout unless explicitly overridden.
+            kwargs.setdefault("timeout", _TUSHARE_QUERY_TIMEOUT_S)
+            return orig_request(self, method, url, **kwargs)
+
+        requests.sessions.Session.request = _request_with_default_timeout
+        _REQUESTS_TIMEOUT_PATCHED = True
     if _RATE_LIMITER is None or getattr(_RATE_LIMITER, "_max", None) != max_cpm:
         _RATE_LIMITER = RateLimiter(max_calls_per_minute=max_cpm)
     return ts.pro_api()
@@ -142,15 +155,25 @@ class TableSpec:
 LIMIT_MAX = 6000
 
 
+class _OffsetPaginationLimitReached(RuntimeError):
+    pass
+
+
 def _pro_query_paged(pro, api: str, *, limit: int, **params) -> pd.DataFrame:
     """
     Query with (limit, offset) paging until exhausted.
     Keeps each API call under a configured row cap (e.g. 6000 rows/call).
     """
     limit = int(limit)
+    max_offset = params.pop("max_offset", None)
+    max_offset_i = int(max_offset) if max_offset is not None else None
     offset = 0
     frames: list[pd.DataFrame] = []
     while True:
+        if max_offset_i is not None and offset > max_offset_i:
+            raise _OffsetPaginationLimitReached(
+                f"offset reached guardrail api={api} offset={offset} max_offset={max_offset_i}"
+            )
         df = _pro_query(pro, api, limit=limit, offset=offset, **params)
         if df is None or df.empty:
             break
@@ -159,6 +182,32 @@ def _pro_query_paged(pro, api: str, *, limit: int, **params) -> pd.DataFrame:
             break
         offset += limit
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _is_tushare_param_error(exc: Exception) -> bool:
+    """
+    Detect Tushare "invalid query parameters" style failures, including wrapped RetryError chains.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = str(cur)
+        if "查询数据失败，请确认参数" in msg:
+            return True
+        if isinstance(cur, RetryError):
+            try:
+                last = cur.last_attempt
+                if last is not None and last.failed:
+                    inner = last.exception()
+                    if inner is not None and id(inner) not in seen:
+                        cur = inner
+                        continue
+            except Exception:
+                pass
+        nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        cur = nxt
+    return False
 
 
 def _post_stock_basic(df: pd.DataFrame) -> pd.DataFrame:
@@ -388,7 +437,56 @@ def _fetch_index_weight_range(_pro, sd: str, ed: str) -> pd.DataFrame:
 
 def _fetch_share_float_range(_pro, sd: str, ed: str) -> pd.DataFrame:
     # doc_id=160 share_float: 单次最大6000行
-    return _pro_query_paged(_pro, "share_float", limit=LIMIT_MAX, start_date=sd, end_date=ed)
+    # Some upstream shards return "参数错误" on very large offsets (e.g. >100k).
+    # Split into monthly windows to keep per-window offsets bounded.
+    start = pd.to_datetime(sd, format="%Y%m%d").date().replace(day=1)
+    end = pd.to_datetime(ed, format="%Y%m%d").date()
+
+    def next_month(d: date) -> date:
+        if d.month == 12:
+            return date(d.year + 1, 1, 1)
+        return date(d.year, d.month + 1, 1)
+
+    frames: list[pd.DataFrame] = []
+
+    def _fetch_window(w_start: date, w_end: date) -> None:
+        try:
+            df = _pro_query_paged(
+                _pro,
+                "share_float",
+                limit=LIMIT_MAX,
+                max_offset=96000,
+                start_date=w_start.strftime("%Y%m%d"),
+                end_date=w_end.strftime("%Y%m%d"),
+            )
+            if df is not None and not df.empty:
+                frames.append(df)
+            return
+        except Exception as ex:
+            # Some shards reject high offsets with a generic "参数错误";
+            # recursively split date windows so each window needs fewer pages.
+            need_split = isinstance(ex, _OffsetPaginationLimitReached) or _is_tushare_param_error(ex)
+            if need_split and w_start < w_end:
+                span = (w_end - w_start).days
+                mid = w_start + timedelta(days=span // 2)
+                ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(
+                    f"[{ts_now}] AS_MASTER.share_float split_window start={w_start.isoformat()} end={w_end.isoformat()} mid={mid.isoformat()}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _fetch_window(w_start, mid)
+                _fetch_window(mid + timedelta(days=1), w_end)
+                return
+            raise
+
+    cur = start
+    while cur <= end:
+        nm = next_month(cur)
+        rng_end = min(end, nm - timedelta(days=1))
+        _fetch_window(cur, rng_end)
+        cur = nm
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _fetch_stk_limit_day(_pro, td: str) -> pd.DataFrame:
